@@ -11,25 +11,18 @@
 (eldev-use-package-archive (cons "etaf" "https://etaf.top/packages/"))
 
 ;; `etaf-html' is the HTML renderer this project is built on.  It is not
-;; published on its own yet: it lives in the `vui-html.el' repository,
-;; next to the `vui-html' package of the same name, which is what Eldev
-;; can fetch that repository as.
+;; published on its own yet: it lives in the `etaf-html.el' repository,
+;; which Eldev can fetch as the `etaf-html' package.
 ;;
-;; Point `ETAF_HTML_DIR' at a local checkout of `vui-html.el' to build
+;; Point `ETAF_HTML_DIR' at a local checkout of that repository to build
 ;; against the copy of `etaf-html.el' under development in it.  Without
-;; that variable the repository is fetched, which only works once
-;; `etaf-html.el' has been pushed to it.  When `etaf-html' gets a
-;; repository or an archive entry of its own, replace all of this with a
-;; plain dependency on `etaf-html'.
-(when-let* ((dir (getenv "ETAF_HTML_DIR")))
-  (eldev-use-local-sources dir))
-(eldev-use-vc-repository 'vui :github "d12frosted/vui.el")
-(eldev-use-vc-repository 'vui+ :github "ginqi7/vui-plus.el")
-(eldev-use-vc-repository 'vui-html :github "ginqi7/vui-html.el")
+;; that variable the repository is fetched.
+(if-let* ((dir (getenv "ETAF_HTML_DIR")))
+    (eldev-use-local-sources dir)
+  (eldev-use-vc-repository 'etaf-html :github "ginqi7/etaf-html.el"))
 
-;; Neither `etaf-html' nor its dependencies are declared anywhere yet.
-;; `ekp' is what the renderer needs, `vui-html' is only fetched to get
-;; at `etaf-html.el'.
+;; `etaf-html' is not declared in `etaf-epub.el's package metadata yet;
+;; it brings in `etaf', `ebox', `ecss' and `ekp' through its own
+;; `Package-Requires'.
 (dolist (set '(runtime compile build test))
-  (eldev-add-extra-dependencies set '(:package vui-html)
-                                '(:package ekp)))
+  (eldev-add-extra-dependencies set '(:package etaf-html)))
