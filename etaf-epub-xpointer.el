@@ -440,11 +440,13 @@ moved to."
       (1+ position))))
 
 (defun etaf-epub-xpointer--step-string (steps)
-  "Format STEPS as the path portion of an XPointer."
+  "Format STEPS as the path portion of an XPointer.
+CREngine writes the first text node as `text()', without an index."
   (mapconcat (lambda (step)
-               (if (eq (car step) 'text)
-                   (format "/text()[%d]" (cdr step))
-                 (format "/%s[%d]" (car step) (cdr step))))
+               (cond
+                ((and (eq (car step) 'text) (= (cdr step) 1)) "/text()")
+                ((eq (car step) 'text) (format "/text()[%d]" (cdr step)))
+                (t (format "/%s[%d]" (car step) (cdr step)))))
              steps ""))
 
 (defun etaf-epub-xpointer--segments (node prefix)
