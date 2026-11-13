@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026  Qiqi Jin
 
 ;; Author: Qiqi Jin <ginqi7@gmail.com>
-;; URL: https://github.com/ginqi7/vui-epub.el
+;; URL: https://github.com/ginqi7/etaf-epub.el
 ;; Keywords: hypermedia, ebooks
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "29.1") (etaf "0.3.5") (esxml "0.3.8"))
