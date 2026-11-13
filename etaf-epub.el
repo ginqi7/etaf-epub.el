@@ -129,6 +129,26 @@ If set to nil, no saving and restoring is performed."
   :type 'integer
   :group 'etaf-epub)
 
+(defcustom etaf-epub-font nil
+  "Font used to display EPUB pages.
+The value is one of:
+
+- nil, to use `etaf-html-font' if it is set, or the default face's
+  font otherwise;
+- a font family name (a string);
+- a font spec or font object;
+- a plist of face attributes, for example
+  \(:family \"Noto Serif CJK SC\" :height 140).  `:size' is also
+  accepted, in points, and is converted to `:height'.
+
+The font is applied to the text rendered by `etaf-epub-render-html'
+and is in effect while measuring the page, so that line breaking
+matches the font used for display."
+  :type '(choice (const :tag "Same as `etaf-html-font'" nil)
+                 (string :tag "Font family")
+                 (plist :key-type symbol :value-type sexp))
+  :group 'etaf-epub)
+
 (defvar-local etaf-epub-file-name nil
   "Path to the EPUB file backing this buffer.")
 
@@ -481,16 +501,62 @@ puts them in ETAF's scoped key layer, which has priority."
            ("w" etaf-epub-copy-url "Copy link")))
    (list view)))
 
+(defun etaf-epub--font ()
+  "Return the font used to display EPUB pages.
+This is `etaf-epub-font', falling back to `etaf-html-font'."
+  (or etaf-epub-font etaf-html-font))
+
+(defvar etaf-epub--font-context nil
+  "Buffer whose page font is currently installed by `etaf-epub--with-font'.")
+
+(defvar-local etaf-epub--installed-font nil
+  "Page font currently installed in this buffer.")
+
+(defun etaf-epub--set-buffer-font (font)
+  "Display the current buffer with FONT.
+The buffer-local face remapping is updated only when FONT is not the
+font already installed.  A real font change also flushes glyph-metric
+caches: EKP and Ebox key most of them by the remapping, but a few
+\(Ebox's cluster and space caches, for example) are global, so they
+must not survive a switch to another font."
+  (unless (and (equal font etaf-epub--installed-font)
+               (or (null font) etaf-html--font-remap))
+    (setq etaf-epub--installed-font font)
+    (etaf-html--set-buffer-font (current-buffer) font)
+    (run-hooks 'after-setting-font-hook)))
+
+(defun etaf-epub--with-font (function)
+  "Call FUNCTION with the EPUB page font in effect in the current buffer.
+The font is installed before FUNCTION runs, both as a buffer-local
+remapping of the `default' face and as the global default face, so
+that EKP measures glyphs with the font that will be used for display.
+Without this, `etaf-html' lays out lines with the default font and the
+page later renders with a different one, which breaks EKP's breaks.
+
+While FUNCTION runs, `after-setting-font-hook' is inhibited: the
+global face change is temporary and the buffer's face remapping
+already identifies the page font.  Letting the hook flush every
+glyph-metric cache on entry and exit would make EKP re-break the
+whole page on every render.  Caches are flushed by
+`etaf-epub--set-buffer-font' when the font actually changes."
+  (if (eq etaf-epub--font-context (current-buffer))
+      (funcall function)
+    (let ((font (etaf-epub--font))
+          (etaf-epub--font-context (current-buffer)))
+      (etaf-epub--set-buffer-font font)
+      (let ((after-setting-font-hook nil))
+        (if font
+            (etaf-html-with-default-font font (funcall function))
+          (funcall function))))))
+
 (defun etaf-epub--mount-view (view)
-  "Mount VIEW in the current buffer, honouring `etaf-html-font'.
+  "Mount VIEW in the current buffer, honouring `etaf-epub-font'.
+The font defaults to `etaf-html-font' when `etaf-epub-font' is nil.
 Return the buffer."
-  (let* ((buffer (current-buffer))
-         (mount (lambda ()
-                  (etaf-mount buffer view etaf-html-mount-options))))
-    (etaf-html--set-buffer-font buffer etaf-html-font)
-    (if etaf-html-font
-        (etaf-html-with-default-font etaf-html-font (funcall mount))
-      (funcall mount))
+  (let ((buffer (current-buffer)))
+    (etaf-epub--with-font
+     (lambda ()
+       (etaf-mount buffer view etaf-html-mount-options)))
     buffer))
 
 (defun etaf-epub--window-width ()
@@ -501,7 +567,12 @@ width Ebox uses for its `(ch N)' length."
   (let ((window (get-buffer-window (current-buffer) t)))
     (if (or window (null etaf-epub--rendered-width))
         (let* ((window (or window (selected-window)))
-               (char-pixels (max 1 (string-pixel-width "0")))
+               ;; Measure with the buffer's face remapping rather than
+               ;; temporarily changing the global default face: this runs
+               ;; on every window change, and the remapping is what Ebox
+               ;; uses for its `(ch N)' lengths anyway.
+               (_ (etaf-epub--set-buffer-font (etaf-epub--font)))
+               (char-pixels (max 1 (etaf-string-pixel-width "0")))
                (pixel-width (or (window-body-width window t)
                                 (* (window-body-width window)
                                    (frame-char-width))))
@@ -586,7 +657,8 @@ width Ebox uses for its `(ch N)' length."
 
 (defun etaf-epub--mount-image (path)
   "Mount the image at PATH in the current buffer."
-  (let* ((cells (etaf-epub--image-cells path))
+  (let* ((cells (etaf-epub--with-font
+                 (lambda () (etaf-epub--image-cells path))))
          (view (etaf-node
                 'column nil
                 (list (etaf-node 'image
@@ -609,9 +681,13 @@ state stays available to link callbacks."
   ;; function returns, so install it buffer-locally before mounting.
   (setq-local etaf-html-browse-url #'etaf-epub-browse-url)
   (setq-local etaf-epub-source-buffer (current-buffer))
-  (let* ((html (etaf-epub--trim-trailing-whitespace (buffer-string)))
-         (view (etaf-epub--page-view (etaf-html html))))
-    (etaf-epub--mount-view view))
+  (let ((html (etaf-epub--trim-trailing-whitespace (buffer-string))))
+    ;; The font must be in effect while `etaf-html' translates the
+    ;; document, because EKP breaks and justifies lines by measuring
+    ;; glyphs at that point.
+    (etaf-epub--with-font
+     (lambda ()
+       (etaf-epub--mount-view (etaf-epub--page-view (etaf-html html))))))
   (run-hooks 'etaf-epub-post-html-render-hook))
 
 (defun etaf-epub-render-document ()
