@@ -21,10 +21,21 @@
 ;;; Commentary:
 
 ;; Syncery is a KOReader plugin that shares reading progress between
-;; devices.  It keeps a `syncery-progress.json' in the book's `.sdr'
-;; folder, holding a percentage and, in newer versions, an XPointer.
-;; The XPointer is preferred: it names the paragraph that was read,
-;; while the percentage only names a place in an estimate.
+;; devices.  It keeps a `*.syncery-progress.json' in the book's `.sdr'
+;; folder, holding a percentage and, for reflowable documents, the
+;; XPointer of the last read text:
+;;
+;;   {"entries": {"3B0...": {"label": "Phone",
+;;                           "percent": 0.42,
+;;                           "xpath": "/body/DocFragment[7]/...text().12",
+;;                           ...}}}
+;;
+;; The `xpath' field is a CREngine XPointer, the same format handled by
+;; `etaf-epub-xpointer'.  It is preferred over the percentage because it
+;; names the text that was read, while the percentage only names a place
+;; in an estimate.  Entries are keyed by device id and carry a revision
+;; and a timestamp, so writing progress updates the local entry in place
+;; instead of replacing the shared state.
 
 ;;; Code:
 
@@ -36,15 +47,44 @@
 (require 'etaf-epub-progress)
 (require 'etaf-epub-xpointer)
 
+(defgroup etaf-epub-syncery nil
+  "Read and write Syncery reading progress."
+  :group 'etaf-epub)
+
+(defcustom etaf-epub-syncery-local-device-name "Emacs"
+  "Device label Syncery uses for progress written from Emacs.
+The entry is stored under the upper-case MD5 of this name, which is
+how the Syncery plugin derives device ids."
+  :type 'string
+  :group 'etaf-epub-syncery)
+
+(defcustom etaf-epub-syncery-remote-device-name nil
+  "Label of the device whose progress is read, or nil for the newest.
+When nil, `etaf-epub-syncery-goto' uses the most recently updated
+entry in the progress file."
+  :type '(choice (const :tag "Newest entry" nil)
+                 (string :tag "Device label"))
+  :group 'etaf-epub-syncery)
+
+;;; The progress file
+
 (defun etaf-epub-syncery--directory ()
   "Return the `.sdr' directory that belongs to the current EPUB, or nil."
   (let* ((epub (or etaf-epub-file-name buffer-file-name))
+         (directory (and epub (file-name-directory epub)))
+         (name (and epub (file-name-nondirectory epub)))
          (candidates
           (delq nil
-                (list (and epub
+                (list ;; KOReader strips the extension when naming the
+                      ;; settings directory: `Book.sdr' for `Book.epub'.
+                      (and epub
                            (expand-file-name
-                            (concat (file-name-nondirectory epub) ".sdr")
-                            (file-name-directory epub)))
+                            (concat (file-name-nondirectory
+                                     (file-name-sans-extension epub))
+                                    ".sdr")
+                            directory))
+                      (and epub
+                           (expand-file-name (concat name ".sdr") directory))
                       (car (directory-files default-directory t "sdr\\'"))))))
     (seq-find (lambda (directory)
                 (and directory (file-directory-p directory)))
@@ -59,38 +99,139 @@
 (defun etaf-epub-syncery-progress ()
   "Return the Syncery progress data of the current EPUB, or nil."
   (when-let* ((file (etaf-epub-syncery-progress-file)))
-    (json-parse-string (with-temp-buffer
-                         (insert-file-contents file)
-                         (buffer-string)))))
+    (condition-case nil
+        (json-parse-string (with-temp-buffer
+                             (insert-file-contents file)
+                             (buffer-string)))
+      (json-error
+       (etaf-epub-warn (format "Could not parse Syncery progress file %s"
+                               file))
+       nil))))
+
+;;; Reading
+
+(defun etaf-epub-syncery--entries ()
+  "Return the per-device entry table of the current EPUB, or nil."
+  (when-let* ((progress (etaf-epub-syncery-progress)))
+    (gethash "entries" progress)))
+
+(defun etaf-epub-syncery--entry-timestamp (entry)
+  "Return ENTRY's Syncery timestamp as a number, or 0."
+  (let ((timestamp (gethash "timestamp" entry)))
+    (if (numberp timestamp) timestamp 0)))
 
 (defun etaf-epub-syncery--entry ()
-  "Return the Syncery entry that belongs to the current EPUB, or nil."
-  (when-let* ((progress (etaf-epub-syncery-progress)))
-    (car (hash-table-values (gethash "entries" progress)))))
+  "Return the Syncery entry to read progress from, or nil.
+This is the entry labelled `etaf-epub-syncery-remote-device-name'
+when that is set, and the most recently updated entry otherwise."
+  (when-let* ((entries (etaf-epub-syncery--entries)))
+    (let ((values (hash-table-values entries)))
+      (or (and etaf-epub-syncery-remote-device-name
+               (seq-find (lambda (entry)
+                           (equal (gethash "label" entry)
+                                  etaf-epub-syncery-remote-device-name))
+                         values))
+          (seq-reduce
+           (lambda (newest entry)
+             (if (> (etaf-epub-syncery--entry-timestamp entry)
+                    (etaf-epub-syncery--entry-timestamp newest))
+                 entry
+               newest))
+           (cdr values)
+           (car values))))))
 
 (defun etaf-epub-syncery-percent ()
   "Return the reading percentage Syncery recorded, or nil.
 It is a number between 0 and 1."
+  (when-let* ((entry (etaf-epub-syncery--entry))
+              (percent (gethash "percent" entry)))
+    (and (numberp percent) percent)))
+
+(defun etaf-epub-syncery-xpath ()
+  "Return the CREngine XPointer from the `xpath' field Syncery recorded.
+Older progress files may name the field `xpointer' instead.  Return
+nil when the entry has no xpath, as for paginated documents."
   (when-let* ((entry (etaf-epub-syncery--entry)))
-    (gethash "percent" entry)))
+    (seq-some (lambda (key)
+                (let ((xpath (gethash key entry)))
+                  (and (stringp xpath)
+                       (not (string-empty-p xpath))
+                       xpath)))
+              '("xpath" "xpointer"))))
 
 (defun etaf-epub-syncery-xpointer ()
-  "Return the XPointer Syncery recorded, or nil."
-  (when-let* ((entry (etaf-epub-syncery--entry)))
-    (seq-find #'stringp
-              (mapcar (lambda (key)
-                        (when (string-match-p "xpointer" key)
-                          (gethash key entry)))
-                      (hash-table-keys entry)))))
+  "Return the XPointer Syncery recorded, or nil.
+This is an alias for `etaf-epub-syncery-xpath'."
+  (etaf-epub-syncery-xpath))
 
 (defun etaf-epub-syncery-goto ()
   "Go to the reading position recorded by Syncery."
   (interactive)
-  (if-let* ((xpointer (etaf-epub-syncery-xpointer)))
-      (etaf-epub-xpointer-goto xpointer)
+  (if-let* ((xpath (etaf-epub-syncery-xpath)))
+      (etaf-epub-xpointer-goto xpath)
     (if-let* ((percent (etaf-epub-syncery-percent)))
         (etaf-epub-progress-goto (* 100 percent))
       (user-error "No Syncery progress found for this EPUB"))))
+
+;;; Writing
+
+(defun etaf-epub-syncery--device-id ()
+  "Return the Syncery device id of the local device."
+  (upcase (md5 etaf-epub-syncery-local-device-name)))
+
+(defun etaf-epub-syncery--local-entry (entries)
+  "Return the local entry of ENTRIES, creating it when necessary."
+  (let ((id (etaf-epub-syncery--device-id)))
+    (or (gethash id entries)
+        (puthash id (make-hash-table :test #'equal) entries))))
+
+(defun etaf-epub-syncery-save-progress (&optional xpath)
+  "Save the current reading position as XPATH in Syncery's progress file.
+XPATH defaults to `etaf-epub-xpointer-at-point', the CREngine
+XPointer of the text at point.  The entry for
+`etaf-epub-syncery-local-device-name' is updated in place: its
+`revision' and `timestamp' are bumped so that other devices see it as
+the newest progress, and `percent', `page', `file', `label' and
+`is_rolling' are kept consistent with the position.
+
+Interactively, prompt for the XPointer to store.  Return the entry
+that was written."
+  (interactive
+   (list (read-string "XPointer: " (etaf-epub-xpointer-at-point))))
+  (let* ((file (or (etaf-epub-syncery-progress-file)
+                   (user-error "No Syncery progress file for this EPUB")))
+         (progress (or (etaf-epub-syncery-progress)
+                       (user-error "Could not parse Syncery progress file %s"
+                                   file)))
+         (entries (or (gethash "entries" progress)
+                      (puthash "entries" (make-hash-table :test #'equal)
+                               progress)))
+         (entry (etaf-epub-syncery--local-entry entries))
+         (xpath (or xpath (etaf-epub-xpointer-at-point)))
+         (percent (/ (etaf-epub-progress-percent) 100.0)))
+    (puthash "device_id" (etaf-epub-syncery--device-id) entry)
+    (puthash "label" etaf-epub-syncery-local-device-name entry)
+    (puthash "file" (or (gethash "file" entry)
+                        etaf-epub-file-name
+                        buffer-file-name)
+             entry)
+    (puthash "is_rolling" t entry)
+    (puthash "percent" percent entry)
+    (let ((total-pages (gethash "total_pages" entry)))
+      (puthash "total_pages" (if (numberp total-pages) total-pages 0) entry)
+      (puthash "page"
+               (if (and (numberp total-pages) (> total-pages 0))
+                   (max 1 (min total-pages
+                               (truncate (* total-pages percent))))
+                 1)
+               entry))
+    (puthash "revision" (1+ (or (gethash "revision" entry) 0)) entry)
+    (puthash "timestamp" (time-convert nil 'integer) entry)
+    (puthash "xpath" xpath entry)
+    (with-temp-file file
+      (insert (json-serialize progress) "\n"))
+    (message "Saved Syncery progress at %s" xpath)
+    entry))
 
 (provide 'etaf-epub-syncery)
 ;;; etaf-epub-syncery.el ends here

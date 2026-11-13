@@ -50,8 +50,8 @@
 ;; - `etaf-epub-xpointer' reads and writes reading positions in the
 ;;   XPointer format used by CREngine and KOReader;
 ;; - `etaf-epub-progress' jumps by percentage of the whole book;
-;; - `etaf-epub-syncery' locates the progress recorded by the KOReader
-;;   plugin of the same name.
+;; - `etaf-epub-syncery' reads and writes the progress recorded by the
+;;   KOReader plugin of the same name.
 ;;
 ;; A mounted Ebox canvas is application output: Ebox claims the movement
 ;; keys for its own focus model and installs a keymap on every painted
