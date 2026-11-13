@@ -1,0 +1,5 @@
+# Eldev builds and installed dependencies
+/.eldev/
+
+# Byte-compiled files
+*.elc

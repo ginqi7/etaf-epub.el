@@ -1,10 +1,35 @@
 ; -*- mode: emacs-lisp; lexical-binding: t -*-
 
-;; Uncomment some calls below as needed for your project.
-;(eldev-use-package-archive 'gnu-elpa)
-;(eldev-use-package-archive 'nongnu-elpa)
-;(eldev-use-package-archive 'melpa)
+;; Eldev configuration for etaf-epub.el
+
+(eldev-use-package-archive 'gnu-elpa)
+(eldev-use-package-archive 'nongnu-elpa)
+(eldev-use-package-archive 'melpa)
+
+;; `etaf', its `ebox' and `ecss' dependencies and `ekp' are published
+;; on the ETAF archive.
+(eldev-use-package-archive (cons "etaf" "https://etaf.top/packages/"))
+
+;; `etaf-html' is the HTML renderer this project is built on.  It is not
+;; published on its own yet: it lives in the `vui-html.el' repository,
+;; next to the `vui-html' package of the same name, which is what Eldev
+;; can fetch that repository as.
+;;
+;; Point `ETAF_HTML_DIR' at a local checkout of `vui-html.el' to build
+;; against the copy of `etaf-html.el' under development in it.  Without
+;; that variable the repository is fetched, which only works once
+;; `etaf-html.el' has been pushed to it.  When `etaf-html' gets a
+;; repository or an archive entry of its own, replace all of this with a
+;; plain dependency on `etaf-html'.
+(when-let* ((dir (getenv "ETAF_HTML_DIR")))
+  (eldev-use-local-sources dir))
 (eldev-use-vc-repository 'vui :github "d12frosted/vui.el")
-(eldev-use-vc-repository 'ekp :github "Kinneyzhang/emacs-kp")
 (eldev-use-vc-repository 'vui+ :github "ginqi7/vui-plus.el")
-(eldev-use-vc-repository 'vui+ :github "ginqi7/vui-html.el")
+(eldev-use-vc-repository 'vui-html :github "ginqi7/vui-html.el")
+
+;; Neither `etaf-html' nor its dependencies are declared anywhere yet.
+;; `ekp' is what the renderer needs, `vui-html' is only fetched to get
+;; at `etaf-html.el'.
+(dolist (set '(runtime compile build test))
+  (eldev-add-extra-dependencies set '(:package vui-html)
+                                '(:package ekp)))
