@@ -129,6 +129,14 @@ If set to nil, no saving and restoring is performed."
   :type 'integer
   :group 'etaf-epub)
 
+(defcustom etaf-epub-auto-resize nil
+  "Whether to re-render the page when its window changes size.
+When nil, the current layout is kept after a window size or
+configuration change; call `etaf-epub-render-document' to lay the
+page out for the current window."
+  :type 'boolean
+  :group 'etaf-epub)
+
 (defcustom etaf-epub-font nil
   "Font used to display EPUB pages.
 The value is one of:
@@ -205,6 +213,9 @@ Each element of the stack is a list (NODEINDEX BUFFERPOS).")
 
 (defvar-local etaf-epub--rendered-width nil
   "Character width used by the current render.")
+
+(defvar-local etaf-epub--rendered-height nil
+  "Window body height in lines used by the current render.")
 
 (defvar-local etaf-epub--resize-timer nil
   "Idle timer that re-renders after a window size change.")
@@ -584,9 +595,19 @@ width Ebox uses for its `(ch N)' length."
       ;; an unrelated window's width.
       etaf-epub--rendered-width)))
 
+(defun etaf-epub--window-height ()
+  "Return the window body height available to the current EPUB page.
+The height is in lines.  If the buffer is buried, keep the last
+rendered height instead of using an unrelated window's height."
+  (let ((window (get-buffer-window (current-buffer) t)))
+    (if (or window (null etaf-epub--rendered-height))
+        (max 1 (window-body-height (or window (selected-window))))
+      etaf-epub--rendered-height)))
+
 (defun etaf-epub--schedule-resize ()
-  "Arrange a width check after the current window operation settles."
-  (when (and (derived-mode-p 'etaf-epub-mode)
+  "Arrange a window size check after the current operation settles."
+  (when (and etaf-epub-auto-resize
+             (derived-mode-p 'etaf-epub-mode)
              (not etaf-epub--resizing))
     (let ((buffer (current-buffer)))
       (when (timerp etaf-epub--resize-timer)
@@ -601,13 +622,19 @@ width Ebox uses for its `(ch N)' length."
                    (etaf-epub--resize)))))))))
 
 (defun etaf-epub--resize ()
-  "Re-render the current EPUB buffer if its window width changed."
+  "Re-render the current EPUB buffer if its window size changed.
+Both width and height are checked: Ebox lays the page out for the
+window it is displayed in, so a height-only change needs a fresh
+mount even though it does not change where lines break."
   (unless etaf-epub--resizing
-    (let ((width (etaf-epub--window-width)))
-      (unless (eq width etaf-epub--rendered-width)
+    (let ((width (etaf-epub--window-width))
+          (height (etaf-epub--window-height)))
+      (unless (and (eq width etaf-epub--rendered-width)
+                   (eq height etaf-epub--rendered-height))
         (let ((etaf-epub--resizing t)
               (point (point)))
-          (setq etaf-epub--rendered-width width)
+          (setq etaf-epub--rendered-width width
+                etaf-epub--rendered-height height)
           (setq-local etaf-html-max-width width)
           (etaf-epub-render-document)
           (etaf-next-tick
@@ -617,18 +644,20 @@ width Ebox uses for its `(ch N)' length."
 
 (defun etaf-epub--window-size-change (frame)
   "Schedule a re-render for EPUB buffers shown in FRAME."
-  (dolist (window (window-list frame 'nomini))
-    (with-current-buffer (window-buffer window)
-      (when (derived-mode-p 'etaf-epub-mode)
-        (etaf-epub--schedule-resize)))))
-
-(defun etaf-epub--window-configuration-change ()
-  "Schedule a re-render for EPUB buffers after a window change."
-  (dolist (frame (frame-list))
+  (when etaf-epub-auto-resize
     (dolist (window (window-list frame 'nomini))
       (with-current-buffer (window-buffer window)
         (when (derived-mode-p 'etaf-epub-mode)
           (etaf-epub--schedule-resize))))))
+
+(defun etaf-epub--window-configuration-change ()
+  "Schedule a re-render for EPUB buffers after a window change."
+  (when etaf-epub-auto-resize
+    (dolist (frame (frame-list))
+      (dolist (window (window-list frame 'nomini))
+        (with-current-buffer (window-buffer window)
+          (when (derived-mode-p 'etaf-epub-mode)
+            (etaf-epub--schedule-resize)))))))
 
 (add-hook 'window-size-change-functions #'etaf-epub--window-size-change)
 (add-hook 'window-configuration-change-hook
@@ -698,6 +727,7 @@ the HTML is rendered with `etaf-epub-render-html-function'."
   (interactive)
   (seq-let (id &rest path) (aref etaf-epub-documents etaf-epub-documents-index)
     (let* ((width (etaf-epub--window-width))
+           (height (etaf-epub--window-height))
            ;; HACK: this should be looked up in the manifest
            (imagep (seq-find (lambda (item) (string-match-p (car item) path))
                              image-type-file-name-regexps))
@@ -706,7 +736,8 @@ the HTML is rendered with `etaf-epub-render-html-function'."
            (inhibit-read-only t)
            buffer-read-only)
       (setq-local etaf-html-max-width width)
-      (setq etaf-epub--rendered-width width)
+      (setq etaf-epub--rendered-width width
+            etaf-epub--rendered-height height)
       (erase-buffer)
 
       (cond
