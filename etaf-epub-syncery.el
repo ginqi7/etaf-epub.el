@@ -34,8 +34,8 @@
 ;; `etaf-epub-xpointer'.  It is preferred over the percentage because it
 ;; names the text that was read, while the percentage only names a place
 ;; in an estimate.  Entries are keyed by device id and carry a revision
-;; and a timestamp, so writing progress updates the local entry in place
-;; instead of replacing the shared state.
+;; and a timestamp.  Writing from Emacs adds or updates its own entry,
+;; so a reader never mistakes Emacs's position for its own.
 
 ;;; Code:
 
@@ -54,14 +54,17 @@
 (defcustom etaf-epub-syncery-local-device-name "Emacs"
   "Device label Syncery uses for progress written from Emacs.
 The entry is stored under the upper-case MD5 of this name, which is
-how the Syncery plugin derives device ids."
+how the Syncery plugin derives device ids.  A separate entry matters:
+other devices only offer a jump to the most recent entry that is not
+their own."
   :type 'string
   :group 'etaf-epub-syncery)
 
 (defcustom etaf-epub-syncery-remote-device-name nil
   "Label of the device whose progress is read, or nil for the newest.
-When nil, `etaf-epub-syncery-goto' uses the most recently updated
-entry in the progress file."
+`etaf-epub-syncery-goto' uses this entry.  `save-progress' uses it,
+or the newest entry when this is nil, as the source of `page' and
+`total_pages' hints for the entry it writes."
   :type '(choice (const :tag "Newest entry" nil)
                  (string :tag "Device label"))
   :group 'etaf-epub-syncery)
@@ -120,11 +123,11 @@ entry in the progress file."
   (let ((timestamp (gethash "timestamp" entry)))
     (if (numberp timestamp) timestamp 0)))
 
-(defun etaf-epub-syncery--entry ()
-  "Return the Syncery entry to read progress from, or nil.
+(defun etaf-epub-syncery--select-entry (entries)
+  "Return the entry in ENTRIES to read and update, or nil.
 This is the entry labelled `etaf-epub-syncery-remote-device-name'
 when that is set, and the most recently updated entry otherwise."
-  (when-let* ((entries (etaf-epub-syncery--entries)))
+  (when entries
     (let ((values (hash-table-values entries)))
       (or (and etaf-epub-syncery-remote-device-name
                (seq-find (lambda (entry)
@@ -139,6 +142,11 @@ when that is set, and the most recently updated entry otherwise."
                newest))
            (cdr values)
            (car values))))))
+
+(defun etaf-epub-syncery--entry ()
+  "Return the Syncery entry to read and update, or nil."
+  (when-let* ((entries (etaf-epub-syncery--entries)))
+    (etaf-epub-syncery--select-entry entries)))
 
 (defun etaf-epub-syncery-percent ()
   "Return the reading percentage Syncery recorded, or nil.
@@ -175,24 +183,32 @@ This is an alias for `etaf-epub-syncery-xpath'."
 
 ;;; Writing
 
-(defun etaf-epub-syncery--device-id ()
-  "Return the Syncery device id of the local device."
+(defun etaf-epub-syncery--local-device-id ()
+  "Return the Syncery device id used for progress written from Emacs."
   (upcase (md5 etaf-epub-syncery-local-device-name)))
 
-(defun etaf-epub-syncery--local-entry (entries)
-  "Return the local entry of ENTRIES, creating it when necessary."
-  (let ((id (etaf-epub-syncery--device-id)))
-    (or (gethash id entries)
-        (puthash id (make-hash-table :test #'equal) entries))))
+(defun etaf-epub-syncery--entry-total-pages (entry)
+  "Return ENTRY's positive `total_pages', or nil."
+  (let ((total (and entry (gethash "total_pages" entry))))
+    (and (numberp total) (> total 0) total)))
+
+(defun etaf-epub-syncery--any-total-pages (entries)
+  "Return a positive `total_pages' found in ENTRIES, or nil."
+  (seq-some #'etaf-epub-syncery--entry-total-pages
+            (hash-table-values entries)))
 
 (defun etaf-epub-syncery-save-progress (&optional xpath)
   "Save the current reading position as XPATH in Syncery's progress file.
 XPATH defaults to `etaf-epub-xpointer-at-point', the CREngine
-XPointer of the text at point.  The entry for
-`etaf-epub-syncery-local-device-name' is updated in place: its
-`revision' and `timestamp' are bumped so that other devices see it as
-the newest progress, and `percent', `page', `file', `label' and
-`is_rolling' are kept consistent with the position.
+XPointer of the text at point.  Write the entry of
+`etaf-epub-syncery-local-device-name', which defaults to Emacs, so
+that other devices see it as a peer and can offer the jump; never
+modify another device's entry.
+
+`percent' is estimated from the text position.  `page' and
+`total_pages' are copied or derived from an existing entry so that a
+failed xpath does not fall back to page 1.  `revision' and
+`timestamp' make the entry the newest progress.
 
 Interactively, prompt for the XPointer to store.  Return the entry
 that was written."
@@ -206,32 +222,45 @@ that was written."
          (entries (or (gethash "entries" progress)
                       (puthash "entries" (make-hash-table :test #'equal)
                                progress)))
-         (entry (etaf-epub-syncery--local-entry entries))
+         (id (etaf-epub-syncery--local-device-id))
+         (entry (or (gethash id entries)
+                    (puthash id (make-hash-table :test #'equal) entries)))
+         (reference (etaf-epub-syncery--select-entry entries))
          (xpath (or xpath (etaf-epub-xpointer-at-point)))
-         (percent (/ (etaf-epub-progress-percent) 100.0)))
-    (puthash "device_id" (etaf-epub-syncery--device-id) entry)
-    (puthash "label" etaf-epub-syncery-local-device-name entry)
-    (puthash "file" (or (gethash "file" entry)
-                        etaf-epub-file-name
-                        buffer-file-name)
-             entry)
-    (puthash "is_rolling" t entry)
-    (puthash "percent" percent entry)
-    (let ((total-pages (gethash "total_pages" entry)))
-      (puthash "total_pages" (if (numberp total-pages) total-pages 0) entry)
-      (puthash "page"
-               (if (and (numberp total-pages) (> total-pages 0))
+         (percent (max 0.0
+                       (min 1.0 (/ (etaf-epub-progress-percent) 100.0))))
+         (total-pages (or (etaf-epub-syncery--entry-total-pages entry)
+                          (etaf-epub-syncery--entry-total-pages reference)
+                          (etaf-epub-syncery--any-total-pages entries)
+                          0))
+         (page (if (> total-pages 0)
                    (max 1 (min total-pages
                                (truncate (* total-pages percent))))
-                 1)
-               entry))
+                 (let ((page (and reference (gethash "page" reference))))
+                   (if (numberp page) (max 1 page) 1)))))
+    (puthash "device_id" id entry)
+    (puthash "label" etaf-epub-syncery-local-device-name entry)
+    (puthash "file" (or etaf-epub-file-name
+                        buffer-file-name
+                        (and reference (gethash "file" reference)))
+             entry)
+    (puthash "is_rolling" t entry)
+    (puthash "xpath" xpath entry)
+    (puthash "percent" percent entry)
+    (puthash "total_pages" total-pages entry)
+    (puthash "page" page entry)
     (puthash "revision" (1+ (or (gethash "revision" entry) 0)) entry)
     (puthash "timestamp" (time-convert nil 'integer) entry)
-    (puthash "xpath" xpath entry)
     (with-temp-file file
       (insert (json-serialize progress) "\n"))
     (message "Saved Syncery progress at %s" xpath)
     entry))
+
+;;; Key bindings
+
+;; `s' is free in `etaf-epub-mode-map'; the other reader keys are bound
+;; in `etaf-epub', `etaf-epub-progress' and `etaf-epub-xpointer'.
+(define-key etaf-epub-mode-map (kbd "s") #'etaf-epub-syncery-save-progress)
 
 (provide 'etaf-epub-syncery)
 ;;; etaf-epub-syncery.el ends here
